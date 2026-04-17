@@ -1,0 +1,1677 @@
+openapi: 3.0.3
+
+info:
+  title: Vault Auth API
+  description: |
+    Full REST API specification for the Vault Authentication App.
+
+    ## Overview
+    JWT-based authentication using **HS256-signed** short-lived access tokens (15 min)
+    and rotating opaque refresh tokens stored server-side for revocation support.
+
+    ## Authentication
+    Protected endpoints require a `Bearer` token in the `Authorization` header:
+    ```
+    Authorization: Bearer <access_token>
+    ```
+
+    ## Roles
+    | Role  | Description |
+    |-------|-------------|
+    | `ADMIN` | Full access — user management, audit logs, system settings |
+    | `USER`  | Standard access — own profile, notifications, preferences |
+
+    ## Rate Limiting & Lockout
+    After **5 consecutive** failed login attempts, the account is soft-locked for **15 minutes**.
+
+  version: 2.0.0
+  contact:
+    name: Engineering Team
+    email: support@example.com
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: https://api.example.com
+    description: Production
+
+# ─── Security Schemes ──────────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        HS256-signed JWT access token (15 minutes TTL).
+        Obtain from POST /auth/login or POST /auth/refresh.
+
+  # ─── Reusable Parameters ───────────────────────────────────────────────────
+  parameters:
+    UserId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        example: u001
+      description: The user's ID
+
+    NotificationId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        example: n001
+      description: The notification's ID
+
+    AuditSeverityFilter:
+      name: severity
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [info, warning, critical]
+      description: Filter audit logs by severity level
+
+    AuditActionFilter:
+      name: action
+      in: query
+      required: false
+      schema:
+        type: string
+        enum:
+          - LOGIN_SUCCESS
+          - LOGIN_FAILED
+          - LOGOUT
+          - LOGOUT_ALL
+          - TOKEN_REFRESH
+          - TOKEN_EXPIRED
+          - PASSWORD_CHANGE
+          - PASSWORD_RESET
+          - USER_CREATED
+          - USER_UPDATED
+          - USER_DELETED
+          - USER_LOCKED
+          - USER_UNLOCKED
+          - SETTINGS_CHANGED
+          - INVITE_SENT
+      description: Filter audit logs by action type
+
+    SearchQuery:
+      name: search
+      in: query
+      required: false
+      schema:
+        type: string
+        example: admin@example.com
+      description: Full-text search across relevant fields
+
+    StatusFilter:
+      name: status
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [active, inactive, locked, pending]
+      description: Filter users by account status
+
+  # ─── Schemas ───────────────────────────────────────────────────────────────
+  schemas:
+
+    # ── Enums ─────────────────────────────────────────────────────────────────
+    Role:
+      type: string
+      enum: [ADMIN, USER]
+      description: User role within the system
+      example: USER
+
+    UserStatus:
+      type: string
+      enum: [active, inactive, locked, pending]
+      description: Current account status
+      example: active
+
+    NotifType:
+      type: string
+      enum: [security, system, info, warning]
+      description: Category of notification
+      example: security
+
+    AuditAction:
+      type: string
+      enum:
+        - LOGIN_SUCCESS
+        - LOGIN_FAILED
+        - LOGOUT
+        - LOGOUT_ALL
+        - TOKEN_REFRESH
+        - TOKEN_EXPIRED
+        - PASSWORD_CHANGE
+        - PASSWORD_RESET
+        - USER_CREATED
+        - USER_UPDATED
+        - USER_DELETED
+        - USER_LOCKED
+        - USER_UNLOCKED
+        - SETTINGS_CHANGED
+        - INVITE_SENT
+      description: Type of audited event
+      example: LOGIN_SUCCESS
+
+    AuditSeverity:
+      type: string
+      enum: [info, warning, critical]
+      description: Severity level of an audit event
+      example: info
+
+    Theme:
+      type: string
+      enum: [dark, light, system]
+      description: UI theme preference
+      example: dark
+
+    # ── Auth ──────────────────────────────────────────────────────────────────
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: admin@example.com
+          description: Registered email address
+        password:
+          type: string
+          format: password
+          minLength: 8
+          example: Admin@1234
+          description: Account password — minimum 8 characters
+        remember_me:
+          type: boolean
+          default: false
+          description: >
+            When true, issues a refresh token valid for 30 days
+            instead of the default 7 days
+
+    TokenResponse:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in, refresh_expires_in]
+      properties:
+        access_token:
+          type: string
+          description: HS256-signed JWT — expires in 15 minutes
+          example: access_abc123xyz_1713234600000
+        refresh_token:
+          type: string
+          description: Opaque token — expires in 7 or 30 days depending on remember_me
+          example: refresh_def456uvw_1713234600000
+        token_type:
+          type: string
+          enum: [Bearer]
+          example: Bearer
+        expires_in:
+          type: integer
+          description: Access token lifetime in seconds
+          example: 900
+        refresh_expires_in:
+          type: integer
+          description: Refresh token lifetime in seconds (604800 = 7d, 2592000 = 30d)
+          example: 604800
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          description: The current valid refresh token
+          example: refresh_def456uvw_1713234600000
+
+    LogoutRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          description: The refresh token for the session to revoke
+          example: refresh_def456uvw_1713234600000
+        logout_all_devices:
+          type: boolean
+          default: false
+          description: >
+            When true, revokes ALL refresh tokens for this user,
+            terminating every active session across all devices
+
+    # ── Users ─────────────────────────────────────────────────────────────────
+    UserProfile:
+      type: object
+      description: Public profile returned from /auth/me — no password field
+      required: [id, email, roles, name, avatar, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: a0000000-0000-0000-0000-000000000001
+        email:
+          type: string
+          format: email
+          example: admin@example.com
+        name:
+          type: string
+          example: Alex Rivera
+        avatar:
+          type: string
+          description: Two-letter initials used as avatar
+          example: AR
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/Role'
+          example: [ADMIN, USER]
+        department:
+          type: string
+          example: Engineering
+        lastLogin:
+          type: string
+          format: date-time
+          example: '2026-04-16T07:30:00Z'
+        created_at:
+          type: string
+          format: date-time
+          example: '2026-04-15T09:00:00Z'
+
+    ManagedUser:
+      type: object
+      description: Full user object as managed by an admin
+      required: [id, name, email, roles, status, department, joined, lastLogin, avatar, loginCount]
+      properties:
+        id:
+          type: string
+          example: u001
+        name:
+          type: string
+          example: Alex Rivera
+        email:
+          type: string
+          format: email
+          example: admin@example.com
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/Role'
+          example: [ADMIN, USER]
+        status:
+          $ref: '#/components/schemas/UserStatus'
+        department:
+          type: string
+          example: Engineering
+        joined:
+          type: string
+          format: date
+          example: '2025-01-10'
+        lastLogin:
+          type: string
+          example: '2026-04-16T07:30:00Z'
+          description: ISO 8601 datetime or "—" if never logged in
+        avatar:
+          type: string
+          description: Two-letter initials
+          example: AR
+        loginCount:
+          type: integer
+          minimum: 0
+          example: 312
+
+    InviteUserRequest:
+      type: object
+      required: [name, email, department, roles]
+      properties:
+        name:
+          type: string
+          example: Jamie Lee
+        email:
+          type: string
+          format: email
+          example: jamie@corp.com
+        department:
+          type: string
+          enum:
+            - Engineering
+            - Marketing
+            - Sales
+            - Finance
+            - IT
+            - HR
+            - Legal
+            - Design
+            - Product
+            - Operations
+          example: Engineering
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/Role'
+          minItems: 1
+          example: [USER]
+
+    UpdateUserRequest:
+      type: object
+      description: Partial update — only provided fields are changed
+      properties:
+        name:
+          type: string
+          example: Jamie Lee
+        department:
+          type: string
+          example: Design
+        status:
+          $ref: '#/components/schemas/UserStatus'
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/Role'
+
+    UserListResponse:
+      type: object
+      required: [users, total]
+      properties:
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/ManagedUser'
+        total:
+          type: integer
+          description: Total number of users matching the filter
+          example: 10
+
+    # ── Notifications ─────────────────────────────────────────────────────────
+    Notification:
+      type: object
+      required: [id, type, title, message, time, read, userId]
+      properties:
+        id:
+          type: string
+          example: n001
+        type:
+          $ref: '#/components/schemas/NotifType'
+        title:
+          type: string
+          example: New login from unknown device
+        message:
+          type: string
+          example: A login was detected from Chrome on Windows in Makati, PH.
+        time:
+          type: string
+          description: Human-readable relative time string
+          example: 10 min ago
+        read:
+          type: boolean
+          example: false
+        userId:
+          type: string
+          description: Target user ID, or "all" for broadcast notifications
+          example: all
+
+    NotificationListResponse:
+      type: object
+      required: [notifications, unreadCount]
+      properties:
+        notifications:
+          type: array
+          items:
+            $ref: '#/components/schemas/Notification'
+        unreadCount:
+          type: integer
+          minimum: 0
+          example: 2
+
+    MarkReadRequest:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          description: ID of the notification to mark as read
+          example: n001
+
+    # ── Audit Logs ────────────────────────────────────────────────────────────
+    AuditLog:
+      type: object
+      required: [id, action, severity, actor, ip, location, device, timestamp, details]
+      properties:
+        id:
+          type: string
+          example: a001
+        action:
+          $ref: '#/components/schemas/AuditAction'
+        severity:
+          $ref: '#/components/schemas/AuditSeverity'
+        actor:
+          type: string
+          format: email
+          description: Email of the user who triggered the event
+          example: admin@example.com
+        target:
+          type: string
+          format: email
+          description: Email of the affected user (if different from actor)
+          example: t.brown@corp.com
+        ip:
+          type: string
+          description: IP address of the request origin
+          example: 192.168.1.10
+        location:
+          type: string
+          description: Geo-resolved location string
+          example: Manila, PH
+        device:
+          type: string
+          description: Device and browser string
+          example: MacBook Pro / Chrome 124
+        timestamp:
+          type: string
+          format: date-time
+          example: '2026-04-16T07:30:00Z'
+        details:
+          type: string
+          description: Human-readable description of the event
+          example: Successful login with remember_me=false
+
+    AuditLogListResponse:
+      type: object
+      required: [logs, total]
+      properties:
+        logs:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditLog'
+        total:
+          type: integer
+          example: 15
+
+    AuditStats:
+      type: object
+      required: [total, info, warning, critical]
+      properties:
+        total:
+          type: integer
+          example: 15
+        info:
+          type: integer
+          example: 10
+        warning:
+          type: integer
+          example: 4
+        critical:
+          type: integer
+          example: 1
+
+    # ── Settings ──────────────────────────────────────────────────────────────
+    SystemSettings:
+      type: object
+      required:
+        - lockoutThreshold
+        - lockoutDurationMinutes
+        - accessTokenTtlSeconds
+        - refreshTokenTtlDays
+        - rememberMeTtlDays
+        - requireMfa
+        - allowedDomains
+        - sessionConcurrencyLimit
+        - auditRetentionDays
+      properties:
+        lockoutThreshold:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 5
+          description: Number of consecutive failed logins before account is locked
+          example: 5
+        lockoutDurationMinutes:
+          type: integer
+          minimum: 1
+          maximum: 1440
+          default: 15
+          description: Duration in minutes an account stays locked
+          example: 15
+        accessTokenTtlSeconds:
+          type: integer
+          minimum: 60
+          maximum: 3600
+          default: 900
+          description: Access token lifetime in seconds
+          example: 900
+        refreshTokenTtlDays:
+          type: integer
+          minimum: 1
+          maximum: 90
+          default: 7
+          description: Default refresh token lifetime in days
+          example: 7
+        rememberMeTtlDays:
+          type: integer
+          minimum: 7
+          maximum: 365
+          default: 30
+          description: Extended refresh token lifetime when remember_me is true
+          example: 30
+        requireMfa:
+          type: boolean
+          default: false
+          description: When true, all users must have MFA enabled to log in
+          example: false
+        allowedDomains:
+          type: string
+          description: Comma-separated list of permitted email domains
+          example: example.com, corp.com
+        sessionConcurrencyLimit:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 5
+          description: Maximum number of simultaneous active sessions per user
+          example: 5
+        auditRetentionDays:
+          type: integer
+          minimum: 7
+          maximum: 365
+          default: 90
+          description: Number of days audit log entries are retained
+          example: 90
+
+    UpdateSystemSettingsRequest:
+      type: object
+      description: Partial update — only provided fields are changed
+      properties:
+        lockoutThreshold:
+          type: integer
+          minimum: 1
+          maximum: 20
+        lockoutDurationMinutes:
+          type: integer
+          minimum: 1
+          maximum: 1440
+        accessTokenTtlSeconds:
+          type: integer
+          minimum: 60
+          maximum: 3600
+        refreshTokenTtlDays:
+          type: integer
+          minimum: 1
+          maximum: 90
+        rememberMeTtlDays:
+          type: integer
+          minimum: 7
+          maximum: 365
+        requireMfa:
+          type: boolean
+        allowedDomains:
+          type: string
+        sessionConcurrencyLimit:
+          type: integer
+          minimum: 1
+          maximum: 20
+        auditRetentionDays:
+          type: integer
+          minimum: 7
+          maximum: 365
+
+    UserPreferences:
+      type: object
+      required:
+        - displayName
+        - email
+        - department
+        - timezone
+        - language
+        - emailOnNewLogin
+        - emailOnPasswordChange
+        - emailOnTokenExpiry
+        - compactMode
+        - theme
+      properties:
+        displayName:
+          type: string
+          example: Alex Rivera
+        email:
+          type: string
+          format: email
+          description: Read-only — cannot be changed via preferences
+          example: admin@example.com
+        department:
+          type: string
+          description: Read-only — set by admin
+          example: Engineering
+        timezone:
+          type: string
+          enum:
+            - Asia/Manila
+            - Asia/Singapore
+            - Asia/Tokyo
+            - Asia/Bangkok
+            - UTC
+            - America/New_York
+            - America/Los_Angeles
+            - Europe/London
+            - Europe/Paris
+          example: Asia/Manila
+        language:
+          type: string
+          enum: [en, fil, ja, zh]
+          example: en
+        emailOnNewLogin:
+          type: boolean
+          default: true
+          description: Send email when a login is detected from a new device
+          example: true
+        emailOnPasswordChange:
+          type: boolean
+          default: true
+          description: Send email on successful password change
+          example: true
+        emailOnTokenExpiry:
+          type: boolean
+          default: false
+          description: Send email reminder before session expires
+          example: false
+        compactMode:
+          type: boolean
+          default: false
+          description: Reduce UI spacing and padding
+          example: false
+        theme:
+          $ref: '#/components/schemas/Theme'
+
+    UpdateUserPreferencesRequest:
+      type: object
+      description: Partial update — only updatable fields are accepted (email and department are read-only)
+      properties:
+        displayName:
+          type: string
+        timezone:
+          type: string
+          enum:
+            - Asia/Manila
+            - Asia/Singapore
+            - Asia/Tokyo
+            - Asia/Bangkok
+            - UTC
+            - America/New_York
+            - America/Los_Angeles
+            - Europe/London
+            - Europe/Paris
+        language:
+          type: string
+          enum: [en, fil, ja, zh]
+        emailOnNewLogin:
+          type: boolean
+        emailOnPasswordChange:
+          type: boolean
+        emailOnTokenExpiry:
+          type: boolean
+        compactMode:
+          type: boolean
+        theme:
+          $ref: '#/components/schemas/Theme'
+
+    # ── Admin Dashboard Stats ─────────────────────────────────────────────────
+    AdminStats:
+      type: object
+      required: [totalUsers, activeToday, newThisWeek, systemLoad]
+      properties:
+        totalUsers:
+          type: integer
+          example: 2847
+        activeToday:
+          type: integer
+          example: 1203
+        newThisWeek:
+          type: integer
+          example: 87
+        systemLoad:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Current system CPU load percentage
+          example: 42
+        recentActivity:
+          type: array
+          items:
+            type: object
+            required: [id, user, action, time, status]
+            properties:
+              id:
+                type: integer
+                example: 1
+              user:
+                type: string
+                format: email
+                example: j.smith@corp.com
+              action:
+                type: string
+                example: Login
+              time:
+                type: string
+                example: 2 min ago
+              status:
+                type: string
+                enum: [success, failed, warning]
+                example: success
+
+    # ── Error Responses ───────────────────────────────────────────────────────
+    ErrorResponse:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          example: invalid_credentials
+        message:
+          type: string
+          example: Email or password is incorrect.
+        request_id:
+          type: string
+          description: Trace ID for support lookups
+          example: req_01HZFK8B3N
+
+    ValidationErrorResponse:
+      type: object
+      required: [error, message, details]
+      properties:
+        error:
+          type: string
+          example: validation_error
+        message:
+          type: string
+          example: Request body is invalid.
+        details:
+          type: array
+          items:
+            type: object
+            required: [field, issue]
+            properties:
+              field:
+                type: string
+                example: email
+              issue:
+                type: string
+                example: Must be a valid email address.
+
+  # ─── Reusable Responses ────────────────────────────────────────────────────
+  responses:
+    Unauthorized:
+      description: Missing, expired, or invalid access token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            token_expired:
+              value:
+                error: token_expired
+                message: Access token has expired. Use /auth/refresh to obtain a new one.
+            invalid_token:
+              value:
+                error: invalid_token
+                message: Access token is invalid or malformed.
+
+    Forbidden:
+      description: Valid token but insufficient role permissions
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: forbidden
+            message: You do not have permission to access this resource.
+
+    NotFound:
+      description: Requested resource does not exist
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: not_found
+            message: The requested resource was not found.
+
+    ValidationError:
+      description: Request body failed schema validation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorResponse'
+
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: internal_error
+            message: An unexpected error occurred. Please try again.
+
+# ─── Tags ──────────────────────────────────────────────────────────────────────
+tags:
+  - name: Authentication
+    description: Login, token refresh, logout
+  - name: Session
+    description: Current user session and profile
+  - name: Users
+    description: User management — CRUD operations (ADMIN only)
+  - name: Notifications
+    description: In-app notifications for the authenticated user
+  - name: Audit Logs
+    description: Immutable record of all system events (ADMIN only)
+  - name: System Settings
+    description: Platform-wide configuration (ADMIN only)
+  - name: User Preferences
+    description: Personal display and notification preferences
+
+# ─── Paths ─────────────────────────────────────────────────────────────────────
+paths:
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # AUTH
+  # ════════════════════════════════════════════════════════════════════════════
+  /auth/login:
+    post:
+      operationId: login
+      tags: [Authentication]
+      summary: Authenticate and obtain tokens
+      description: |
+        Validates credentials and returns a short-lived JWT access token
+        plus a longer-lived opaque refresh token.
+
+        **Account lockout**: After 5 consecutive failed attempts the account is
+        soft-locked for 15 minutes. This threshold and duration are configurable
+        via `PATCH /settings/system`.
+
+        **Seed accounts**:
+        - `admin@example.com` / `Admin@1234` → roles: ADMIN, USER
+        - `user@example.com` / `User@1234` → roles: USER
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            examples:
+              admin_login:
+                summary: Admin account
+                value:
+                  email: admin@example.com
+                  password: Admin@1234
+                  remember_me: false
+              user_login:
+                summary: Regular user
+                value:
+                  email: user@example.com
+                  password: User@1234
+                  remember_me: true
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/TokenResponse'
+                  - type: object
+                    properties:
+                      user:
+                        $ref: '#/components/schemas/UserProfile'
+              example:
+                access_token: access_abc123_1713234600000
+                refresh_token: refresh_def456_1713234600000
+                token_type: Bearer
+                expires_in: 900
+                refresh_expires_in: 604800
+                user:
+                  id: a0000000-0000-0000-0000-000000000001
+                  email: admin@example.com
+                  name: Alex Rivera
+                  avatar: AR
+                  roles: [ADMIN, USER]
+                  department: Engineering
+                  created_at: '2026-04-15T09:00:00Z'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: invalid_credentials
+                message: Email or password is incorrect.
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '423':
+          description: Account locked due to repeated failed attempts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: account_locked
+                message: Account temporarily locked due to repeated failed login attempts.
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/refresh:
+    post:
+      operationId: refreshToken
+      tags: [Authentication]
+      summary: Exchange a refresh token for a new token pair
+      description: |
+        Issues a new access token and rotates the refresh token.
+        The old refresh token is **immediately revoked**.
+
+        **Replay detection**: If a previously used (revoked) refresh token is
+        submitted, all sessions for that user are immediately terminated as a
+        security measure.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+            example:
+              refresh_token: refresh_def456_1713234600000
+      responses:
+        '200':
+          description: New token pair issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          description: Refresh token invalid, expired, revoked, or replayed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                expired:
+                  value:
+                    error: refresh_token_expired
+                    message: Refresh token has expired. Please log in again.
+                revoked:
+                  value:
+                    error: refresh_token_revoked
+                    message: Refresh token has been revoked.
+                replayed:
+                  value:
+                    error: refresh_token_reuse_detected
+                    message: Token reuse detected. All sessions have been revoked.
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/logout:
+    post:
+      operationId: logout
+      tags: [Authentication]
+      summary: Revoke session and invalidate refresh token
+      description: |
+        Revokes the provided refresh token, ending that session.
+        The access token remains valid until natural expiry (15 minutes)
+        but the refresh token can no longer be used.
+
+        Set `logout_all_devices: true` to revoke **all** active sessions.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+            examples:
+              single_session:
+                summary: Logout current session only
+                value:
+                  refresh_token: refresh_def456_1713234600000
+                  logout_all_devices: false
+              all_devices:
+                summary: Logout all devices
+                value:
+                  refresh_token: refresh_def456_1713234600000
+                  logout_all_devices: true
+      responses:
+        '204':
+          description: Logout successful — no response body
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/me:
+    get:
+      operationId: getMe
+      tags: [Session]
+      summary: Get current authenticated user profile
+      description: |
+        Returns the profile of the currently authenticated user
+        derived from the JWT access token claims. No request body.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Current user profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+              examples:
+                admin:
+                  value:
+                    id: a0000000-0000-0000-0000-000000000001
+                    email: admin@example.com
+                    name: Alex Rivera
+                    avatar: AR
+                    roles: [ADMIN, USER]
+                    department: Engineering
+                    lastLogin: '2026-04-16T07:30:00Z'
+                    created_at: '2026-04-15T09:00:00Z'
+                user:
+                  value:
+                    id: a0000000-0000-0000-0000-000000000002
+                    email: user@example.com
+                    name: Sam Chen
+                    avatar: SC
+                    roles: [USER]
+                    department: Marketing
+                    lastLogin: '2026-04-16T08:15:00Z'
+                    created_at: '2026-04-15T09:00:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # USERS  (ADMIN only)
+  # ════════════════════════════════════════════════════════════════════════════
+  /users:
+    get:
+      operationId: listUsers
+      tags: [Users]
+      summary: List all managed users
+      description: Returns a paginated list of all user accounts. ADMIN role required.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/StatusFilter'
+        - $ref: '#/components/parameters/SearchQuery'
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: Page number
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 7
+          description: Number of results per page
+      responses:
+        '200':
+          description: User list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserListResponse'
+              example:
+                users:
+                  - id: u001
+                    name: Alex Rivera
+                    email: admin@example.com
+                    roles: [ADMIN, USER]
+                    status: active
+                    department: Engineering
+                    joined: '2025-01-10'
+                    lastLogin: '2026-04-16T07:30:00Z'
+                    avatar: AR
+                    loginCount: 312
+                total: 10
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    post:
+      operationId: inviteUser
+      tags: [Users]
+      summary: Invite a new user
+      description: |
+        Creates a new user account with status `pending` and sends an invitation.
+        The new user is assigned the provided role(s) and department.
+        ADMIN role required.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InviteUserRequest'
+            example:
+              name: Jamie Lee
+              email: jamie@corp.com
+              department: Design
+              roles: [USER]
+      responses:
+        '201':
+          description: User invited successfully — returns the new user object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagedUser'
+              example:
+                id: u9876
+                name: Jamie Lee
+                email: jamie@corp.com
+                roles: [USER]
+                status: pending
+                department: Design
+                joined: '2026-04-17'
+                lastLogin: '—'
+                avatar: JL
+                loginCount: 0
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /users/{id}:
+    get:
+      operationId: getUserById
+      tags: [Users]
+      summary: Get a single user by ID
+      description: Returns full details of one user account. ADMIN role required.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: User found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagedUser'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    patch:
+      operationId: updateUser
+      tags: [Users]
+      summary: Update a user account
+      description: |
+        Partially updates a user. Only provided fields are changed.
+        ADMIN role required.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserRequest'
+            examples:
+              change_status:
+                summary: Lock a user
+                value:
+                  status: locked
+              change_department:
+                summary: Move to new department
+                value:
+                  department: Product
+              promote_to_admin:
+                summary: Promote to admin
+                value:
+                  roles: [ADMIN, USER]
+      responses:
+        '200':
+          description: User updated — returns updated user object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagedUser'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    delete:
+      operationId: deleteUser
+      tags: [Users]
+      summary: Delete a user account
+      description: |
+        Permanently removes a user from the system.
+        All active sessions for that user are immediately revoked.
+        ADMIN role required. This action is irreversible.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '204':
+          description: User deleted successfully — no response body
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # NOTIFICATIONS
+  # ════════════════════════════════════════════════════════════════════════════
+  /notifications:
+    get:
+      operationId: getNotifications
+      tags: [Notifications]
+      summary: Get notifications for the current user
+      description: |
+        Returns all notifications scoped to the authenticated user —
+        includes their own notifications plus broadcast (`userId: "all"`) messages.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: unread_only
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: When true, returns only unread notifications
+      responses:
+        '200':
+          description: Notification list with unread count
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationListResponse'
+              example:
+                notifications:
+                  - id: n001
+                    type: security
+                    title: New login from unknown device
+                    message: A login was detected from Chrome on Windows in Makati, PH.
+                    time: 10 min ago
+                    read: false
+                    userId: all
+                unreadCount: 2
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /notifications/read-all:
+    post:
+      operationId: markAllNotificationsRead
+      tags: [Notifications]
+      summary: Mark all notifications as read
+      description: Marks every unread notification for the current user as read.
+      security:
+        - BearerAuth: []
+      responses:
+        '204':
+          description: All notifications marked as read — no response body
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /notifications/{id}:
+    patch:
+      operationId: markNotificationRead
+      tags: [Notifications]
+      summary: Mark a single notification as read
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/NotificationId'
+      responses:
+        '204':
+          description: Notification marked as read
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    delete:
+      operationId: deleteNotification
+      tags: [Notifications]
+      summary: Delete a notification
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/NotificationId'
+      responses:
+        '204':
+          description: Notification deleted — no response body
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # AUDIT LOGS  (ADMIN only)
+  # ════════════════════════════════════════════════════════════════════════════
+  /audit-logs:
+    get:
+      operationId: getAuditLogs
+      tags: [Audit Logs]
+      summary: Retrieve audit log entries
+      description: |
+        Returns a filterable, paginated list of all system audit events.
+        Supports filtering by severity, action type, and free-text search
+        across actor, target, and details fields. ADMIN role required.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AuditSeverityFilter'
+        - $ref: '#/components/parameters/AuditActionFilter'
+        - $ref: '#/components/parameters/SearchQuery'
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 8
+      responses:
+        '200':
+          description: Audit log list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditLogListResponse'
+              example:
+                logs:
+                  - id: a001
+                    action: LOGIN_SUCCESS
+                    severity: info
+                    actor: admin@example.com
+                    ip: 192.168.1.10
+                    location: Manila, PH
+                    device: MacBook Pro / Chrome 124
+                    timestamp: '2026-04-16T07:30:00Z'
+                    details: Successful login with remember_me=false
+                total: 15
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /audit-logs/stats:
+    get:
+      operationId: getAuditStats
+      tags: [Audit Logs]
+      summary: Get audit log severity counts
+      description: Returns aggregate counts broken down by severity. ADMIN role required.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Audit statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditStats'
+              example:
+                total: 15
+                info: 10
+                warning: 4
+                critical: 1
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # SYSTEM SETTINGS  (ADMIN only)
+  # ════════════════════════════════════════════════════════════════════════════
+  /settings/system:
+    get:
+      operationId: getSystemSettings
+      tags: [System Settings]
+      summary: Get current system settings
+      description: Returns the full system configuration object. ADMIN role required.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Current system settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemSettings'
+              example:
+                lockoutThreshold: 5
+                lockoutDurationMinutes: 15
+                accessTokenTtlSeconds: 900
+                refreshTokenTtlDays: 7
+                rememberMeTtlDays: 30
+                requireMfa: false
+                allowedDomains: example.com, corp.com
+                sessionConcurrencyLimit: 5
+                auditRetentionDays: 90
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    patch:
+      operationId: updateSystemSettings
+      tags: [System Settings]
+      summary: Update system settings
+      description: |
+        Partially updates the system configuration. Only provided fields are changed.
+        Changes take effect immediately. ADMIN role required.
+        Every change is recorded as a `SETTINGS_CHANGED` audit log event.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSystemSettingsRequest'
+            examples:
+              change_lockout:
+                summary: Update lockout threshold
+                value:
+                  lockoutThreshold: 3
+                  lockoutDurationMinutes: 30
+              enable_mfa:
+                summary: Require MFA for all users
+                value:
+                  requireMfa: true
+              update_token_ttl:
+                summary: Shorten access token TTL
+                value:
+                  accessTokenTtlSeconds: 600
+      responses:
+        '200':
+          description: Settings updated — returns the full updated settings object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # USER PREFERENCES
+  # ════════════════════════════════════════════════════════════════════════════
+  /preferences:
+    get:
+      operationId: getUserPreferences
+      tags: [User Preferences]
+      summary: Get current user's preferences
+      description: Returns the display and notification preferences for the authenticated user.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: User preferences
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPreferences'
+              example:
+                displayName: Sam Chen
+                email: user@example.com
+                department: Marketing
+                timezone: Asia/Manila
+                language: en
+                emailOnNewLogin: true
+                emailOnPasswordChange: true
+                emailOnTokenExpiry: false
+                compactMode: false
+                theme: dark
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    patch:
+      operationId: updateUserPreferences
+      tags: [User Preferences]
+      summary: Update current user's preferences
+      description: |
+        Partially updates the user's preferences. Only provided fields are changed.
+        Note: `email` and `department` fields are read-only and will be ignored if included.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserPreferencesRequest'
+            examples:
+              change_theme:
+                summary: Switch to light theme
+                value:
+                  theme: light
+              update_notifications:
+                summary: Turn off token expiry emails
+                value:
+                  emailOnTokenExpiry: false
+                  emailOnNewLogin: true
+              change_timezone:
+                summary: Change timezone
+                value:
+                  timezone: Asia/Singapore
+      responses:
+        '200':
+          description: Preferences updated — returns full updated preferences object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPreferences'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # ADMIN DASHBOARD
+  # ════════════════════════════════════════════════════════════════════════════
+  /admin/stats:
+    get:
+      operationId: getAdminStats
+      tags: [Users]
+      summary: Get admin dashboard statistics
+      description: |
+        Returns aggregate platform statistics including total users,
+        active today, new this week, system load, and recent activity feed.
+        ADMIN role required.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Admin dashboard stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminStats'
+              example:
+                totalUsers: 2847
+                activeToday: 1203
+                newThisWeek: 87
+                systemLoad: 42
+                recentActivity:
+                  - id: 1
+                    user: j.smith@corp.com
+                    action: Login
+                    time: 2 min ago
+                    status: success
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
