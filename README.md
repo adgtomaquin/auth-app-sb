@@ -328,10 +328,3 @@ git commit -m "feat: describe your change"
 git push origin feature/your-feature-name
 ```
 
----
-
-## Author
-
-**Antonio D. Tomaquin**  
-antoniodeguzmantomaquin@gmail.com  
-https://github.com/adgtomaquin
